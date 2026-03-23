@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+<meta charset="UTF-8">
+<title>bwimage2wav - Black and White Horizon Image to WAVE</title>
+<style>
+body{
+font-family:monospace;
+background:white;
+color:black;
+margin:20px;
+}
+#drop{
+border:1px solid black;
+padding:40px;
+text-align:center;
+cursor:pointer;
+}
+button{
+border:1px solid black;
+background:white;
+padding:8px;
+margin:3px;
+cursor:pointer;
+display:block;
+min-width:140px;
+}
+.btnGroup{
+display:inline-block;
+margin-right:10px;
+margin-bottom:10px;
+vertical-align:top;
+}
+#error{color:red;margin-top:10px;}
+#success{color:green;margin-top:10px;}
+#warn{color:black;margin-top:10px;}
+#info{color:black;margin-top:10px;}
+
+canvas{display:none;}
+
+#preview{
+margin-top:20px;
+max-width:100%;
+height:auto;
+display:none;
+border:1px solid black;
+}
+</style>
+</head>
+<body>
+
+<h3>bwimage2wav - Black and White Horizon Image to WAVE</h3>
+
+<div id="drop">Drop image / Paste / Click</div>
+
+<div id="buttons"></div>
+
+<img id="preview">
+
+<div id="info"></div>
+<div id="success"></div>
+<div id="warn"></div>
+<div id="error"></div>
+
+<input type="file" id="file" accept="image/*" style="display:none">
+<canvas id="canvas"></canvas>
+
+<script>
+
+// --- DOM references ---
+const drop=document.getElementById("drop")
+const fileInput=document.getElementById("file")
+const canvas=document.getElementById("canvas")
+const ctx=canvas.getContext("2d")
+
+const error=document.getElementById("error")
+const warn=document.getElementById("warn")
+const success=document.getElementById("success")
+const info=document.getElementById("info")
+
+const preview=document.getElementById("preview")
+const buttonsDiv=document.getElementById("buttons")
+
+// --- state ---
+let samples=null
+let inputName="bwimg2wav"
+let imgWidth=0
+
+// --- helpers ---
+function ts(){
+const d=new Date()
+return `[${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}.${String(d.getMilliseconds()).padStart(3,"0")}]`
+}
+
+function fmt(n){
+return n>999 ? n.toLocaleString("en-US") : n
+}
+
+function setInputName(filename){
+const dot=filename.lastIndexOf(".")
+inputName = dot>0 ? filename.substring(0,dot) : filename
+}
+
+function clearMessages(){
+error.textContent=""
+warn.textContent=""
+success.textContent=""
+info.textContent=""
+}
+
+// --- file handling ---
+drop.onclick=()=>fileInput.click()
+
+fileInput.onchange=e=>{
+const f=e.target.files[0]
+if(f){
+setInputName(f.name)
+loadFile(f)
+}
+}
+
+drop.ondragover=e=>e.preventDefault()
+
+drop.ondrop=e=>{
+e.preventDefault()
+if(e.dataTransfer.files[0]){
+const f=e.dataTransfer.files[0]
+setInputName(f.name)
+loadFile(f)
+}
+}
+
+window.addEventListener("paste",e=>{
+for(const item of e.clipboardData.items){
+if(item.type.startsWith("image")){
+inputName="bwimg2wav"
+loadFile(item.getAsFile())
+}
+}
+})
+
+// --- load image ---
+function loadFile(file){
+
+clearMessages()
+buttonsDiv.innerHTML=""
+info.textContent = `${ts()} Loading ${file.name}...`
+
+const img=new Image()
+img.onload=()=>{
+preview.src=img.src
+preview.style.display="block"
+processImage(img)
+}
+img.src=URL.createObjectURL(file)
+}
+
+// --- process image ---
+function processImage(img){
+
+canvas.width=img.width
+canvas.height=img.height
+imgWidth=img.width
+
+if(canvas.width===0){
+error.textContent=`${ts()} Error: image width is 0.`
+return
+}
+
+ctx.drawImage(img,0,0)
+
+const w=canvas.width
+const h=canvas.height
+const data=ctx.getImageData(0,0,w,h).data
+
+samples=new Float32Array(w)
+
+// extract waveform
+for(let x=0;x<w;x++){
+
+let found=false
+let yPos=h
+
+for(let y=0;y<h;y++){
+
+const i=(y*w+x)*4
+const r=data[i], g=data[i+1], b=data[i+2]
+
+const isWhite=(r===255 && g===255 && b===255)
+const isBlack=(r===0 && g===0 && b===0)
+
+if(!isWhite && !isBlack){
+error.textContent=`${ts()} Error: image must contain only pure black and white.`
+return
+}
+
+if(isBlack){
+yPos=y
+found=true
+break
+}
+}
+
+if(!found) yPos=h
+
+let amp=1-(yPos/h)
+amp=amp*2-1
+samples[x]=amp
+}
+
+// identical check
+let identical=true
+for(let i=1;i<samples.length;i++){
+if(samples[i]!==samples[0]){identical=false;break}
+}
+if(identical){
+warn.textContent=`${ts()} Warning: all samples identical.`
+}
+
+buildButtons()
+
+success.textContent=`${ts()} Success: WAV ready (${samples.length} samples).`
+}
+
+// --- loop calc ---
+function getLoopCount(rate){
+const baseDuration = samples.length / rate
+let loops = Math.ceil(1 / baseDuration)
+if(loops < 4) loops = 4
+return loops
+}
+
+// --- build UI ---
+function buildButtons(){
+
+const rates=[44100,imgWidth,imgWidth*2,imgWidth*4,22050,11025]
+rates.sort((a,b)=>a-b)
+
+buttonsDiv.innerHTML=""
+
+rates.forEach(rate=>{
+
+const loops=getLoopCount(rate)
+
+const group=document.createElement("div")
+group.className="btnGroup"
+
+const b1=document.createElement("button")
+b1.textContent=`Download ${fmt(rate)} Hz`
+b1.onclick=()=>downloadWav(rate, 1)
+
+const b2=document.createElement("button")
+b2.textContent=`Download ${fmt(rate)} Hz (${loops}x loop)`
+b2.onclick=()=>downloadWav(rate, loops)
+
+group.appendChild(b1)
+group.appendChild(b2)
+
+buttonsDiv.appendChild(group)
+
+})
+}
+
+// --- wav creation ---
+function createWav(samples,sampleRate){
+
+const buffer=new ArrayBuffer(44+samples.length*2)
+const view=new DataView(buffer)
+
+function writeString(offset,str){
+for(let i=0;i<str.length;i++){
+view.setUint8(offset+i,str.charCodeAt(i))
+}
+}
+
+writeString(0,"RIFF")
+view.setUint32(4,36+samples.length*2,true)
+writeString(8,"WAVE")
+
+writeString(12,"fmt ")
+view.setUint32(16,16,true)
+view.setUint16(20,1,true)
+view.setUint16(22,1,true)
+view.setUint32(24,sampleRate,true)
+view.setUint32(28,sampleRate*2,true)
+view.setUint16(32,2,true)
+view.setUint16(34,16,true)
+
+writeString(36,"data")
+view.setUint32(40,samples.length*2,true)
+
+let offset=44
+for(let i=0;i<samples.length;i++){
+let s=Math.max(-1,Math.min(1,samples[i]))
+view.setInt16(offset,s*32767,true)
+offset+=2
+}
+
+return new Blob([buffer],{type:"audio/wav"})
+}
+
+// --- download ---
+function downloadWav(rate, loops){
+
+if(!samples) return
+
+const outSamples=new Float32Array(samples.length*loops)
+
+for(let i=0;i<loops;i++){
+outSamples.set(samples,i*samples.length)
+}
+
+const wavBlob=createWav(outSamples,rate)
+
+const a=document.createElement("a")
+a.href=URL.createObjectURL(wavBlob)
+
+a.download = loops===1
+  ? `${inputName}_bwimg2wav_${rate}hz_${timestamp()}.wav`
+  : `${inputName}_bwimg2wav_${rate}hz_${loops}x_${timestamp()}.wav`
+
+a.click()
+}
+
+// --- filename timestamp ---
+function timestamp(){
+const d=new Date()
+return d.getFullYear()+
+String(d.getMonth()+1).padStart(2,"0")+
+String(d.getDate()).padStart(2,"0")+"_"+
+
+String(d.getHours()).padStart(2,"0")+
+String(d.getMinutes()).padStart(2,"0")+
+String(d.getSeconds()).padStart(2,"0")
+}
+
+</script>
+
+</body>
+</html>
